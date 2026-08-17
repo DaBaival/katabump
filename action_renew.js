@@ -1172,7 +1172,7 @@ async function switchMihomoProxy(name) {
                                 await page.waitForTimeout(3000);
                                 
                                 let accurateDate = "已续期(待下次更新)";
-                                let accurateDays = "约30";
+                                let accurateDays = "4";
                                 try {
                                     const renewBtnCheck = page.getByRole('button', { name: 'Renew', exact: true }).first();
                                     if (await renewBtnCheck.isVisible()) {
