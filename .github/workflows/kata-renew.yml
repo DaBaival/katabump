@@ -1,4 +1,4 @@
-name: "@s5gydl kata 自动续期任务"
+name: "kata 自动续期任务"
 
 on:
   schedule:
