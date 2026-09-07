@@ -1504,7 +1504,7 @@ async function switchMihomoProxy(name) {
                         const failSafe = user.username.replace(/[^a-z0-9]/gi, '_');
                         const failScreenshot = path.join(failPhotoDir, `${failSafe}_login_fail.png`);
                         try { await saveViewportScreenshot(page, failScreenshot); } catch (e) {}
-                        await sendTelegramMessage(`❌ *[@s5gydl] ${escapeMarkdown(user.username)}*\n登录失败: 账号或密码错误`, failScreenshot);
+                        await sendTelegramMessage(`❌ *${escapeMarkdown(user.username)}*\n登录失败: 账号或密码错误`, failScreenshot);
                         stats.failed++;
                         stats.failedAccounts.push(user.username);
                         accountDatesInfo[user.username] = {
@@ -1569,7 +1569,7 @@ async function switchMihomoProxy(name) {
 
                     let nextNoticeText = serverStatus.nextAvailableNotice ? `\n⏳ 下次可续期: \`${serverStatus.nextAvailableNotice}\`` : '';
                     await sendTelegramMessage(
-                        `🔄 *[@s5gydl] ${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${pageActualExpiry || '已校正'}\` (还剩 ${daysLeft} 天)${nextNoticeText}`,
+                        `🔄 *${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${pageActualExpiry || '已校正'}\` (还剩 ${daysLeft} 天)${nextNoticeText}`,
                         statusScreenshot
                     );
 
@@ -1653,7 +1653,7 @@ async function switchMihomoProxy(name) {
 
                                 let nextNoticeText = afterClickStatus.nextAvailableNotice ? `\n⏳ 下次可续期: \`${afterClickStatus.nextAvailableNotice}\`` : '';
                                 await sendTelegramMessage(
-                                    `🔄 *[@s5gydl] ${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${curExpiry || '已校正'}\` (还剩 ${daysLeft} 天)${nextNoticeText}`,
+                                    `🔄 *${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${curExpiry || '已校正'}\` (还剩 ${daysLeft} 天)${nextNoticeText}`,
                                     statusScreenshot
                                 );
 
@@ -1709,7 +1709,7 @@ async function switchMihomoProxy(name) {
 
                                     let nextNoticeText = refreshedStatus.nextAvailableNotice ? `\n⏳ 下次可续期: \`${refreshedStatus.nextAvailableNotice}\`` : '';
                                     await sendTelegramMessage(
-                                        `🔄 *[@s5gydl] ${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${curExpiry || '已校正'}\` (还剩 ${daysLeft} 天)${nextNoticeText}`,
+                                        `🔄 *${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${curExpiry || '已校正'}\` (还剩 ${daysLeft} 天)${nextNoticeText}`,
                                         statusScreenshot
                                     );
 
@@ -1738,7 +1738,7 @@ async function switchMihomoProxy(name) {
                                     const successScreenshot = path.join(photoDir, `${safeUsername}_success.png`);
                                     try { await saveViewportScreenshot(page, successScreenshot); } catch (e) {}
                                     await sendTelegramMessage(
-                                        `✅ *[@s5gydl] ${escapeMarkdown(user.username)}*\n续期成功！\n📅 有效期更新至: \`${newExpiry}\` (还剩 ${accurateDays} 天)`,
+                                        `✅ *${escapeMarkdown(user.username)}*\n续期成功！\n📅 有效期更新至: \`${newExpiry}\` (还剩 ${accurateDays} 天)`,
                                         successScreenshot
                                     );
 
@@ -1765,7 +1765,7 @@ async function switchMihomoProxy(name) {
                                     const statusScreenshot = path.join(photoDir, `${safeUsername}_status.png`);
                                     try { await saveViewportScreenshot(page, statusScreenshot); } catch (e) {}
                                     await sendTelegramMessage(
-                                        `🔄 *[@s5gydl] ${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${curExpiry}\` (还剩 ${daysLeft} 天)`,
+                                        `🔄 *${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${curExpiry}\` (还剩 ${daysLeft} 天)`,
                                         statusScreenshot
                                     );
 
@@ -1803,7 +1803,7 @@ async function switchMihomoProxy(name) {
                         const statusScreenshot = path.join(photoDir, `${safeUsername}_status.png`);
                         try { await saveViewportScreenshot(page, statusScreenshot); } catch (e) {}
                         await sendTelegramMessage(
-                            `🔄 *[@s5gydl] ${escapeMarkdown(user.username)}*\n校正日期成功\n📅 实际有效期: \`${curExpiry}\` (还剩 ${daysLeft} 天)`,
+                            `🔄 *${escapeMarkdown(user.username)}*\n校正日期成功\n📅 实际有效期: \`${curExpiry}\` (还剩 ${daysLeft} 天)`,
                             statusScreenshot
                         );
                         stats.skipped++;
@@ -1841,7 +1841,7 @@ async function switchMihomoProxy(name) {
             if (page && !page.isClosed()) {
                 try { await saveViewportScreenshot(page, failScreenshot); } catch (e) {}
             }
-            await sendTelegramMessage(`❌ *[@s5gydl] ${escapeMarkdown(user.username)}*\n${accountFailureReason} (已重试 ${maxAttempts} 次)`, failScreenshot);
+            await sendTelegramMessage(`❌ *${escapeMarkdown(user.username)}*\n${accountFailureReason} (已重试 ${maxAttempts} 次)`, failScreenshot);
             stats.failed++;
             stats.failedAccounts.push(user.username);
             accountDatesInfo[user.username] = {
@@ -1863,7 +1863,6 @@ async function switchMihomoProxy(name) {
 
     // --- 发送最终汇总报告 ---
     let summaryMessage = `📊 *续期任务汇总报告*\n`;
-    summaryMessage += `📢 来源群组: @s5gydl\n\n`;
     
     if (proxyStats.source !== 'NONE') {
         summaryMessage += `🌐 *节点池状态* (${proxyStats.source}):\n`;
