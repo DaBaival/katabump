@@ -21,7 +21,6 @@ jobs:
       uses: actions/setup-node@v5
       with:
         node-version: '22'
-        cache: 'npm'
 
     - name: Cache Node Modules
       id: cache-npm
@@ -74,8 +73,10 @@ jobs:
       run: |
         git config --global user.name 'github-actions[bot]'
         git config --global user.email 'github-actions[bot]@users.noreply.github.com'
-        git add renew_dates.json || true
-        git diff --cached --quiet renew_dates.json || git commit -m "chore: update renew dates [skip ci]"
+        if [ -f renew_dates.json ]; then
+          git add renew_dates.json
+          git diff --cached --quiet -- renew_dates.json || git commit -m "chore: update renew dates [skip ci]"
+        fi
         for i in {1..5}; do
           git pull --rebase --autostash || true
           if git push; then
