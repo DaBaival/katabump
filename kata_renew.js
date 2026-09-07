@@ -10,15 +10,6 @@ const TG_BOT_TOKEN = process.env.TG_BOT_TOKEN;
 const TG_CHAT_ID = process.env.TG_CHAT_ID;
 const TG_THREAD_ID = process.env.TG_THREAD_ID;
 
-// 调试截图推送开关 (支持环境变量 DEBUG 或 DEBUG_SCREENSHOT: true / 1 / yes / on)
-const IS_DEBUG_MODE = ['true', '1', 'yes', 'on'].includes(
-    (process.env.DEBUG_SCREENSHOT || process.env.DEBUG || '').trim().toLowerCase()
-);
-if (IS_DEBUG_MODE) {
-    console.log('🔍 [调试模式] 已开启 DEBUG 截图实时 Telegram 推送！');
-}
-
-
 let stats = {
     total: 0,
     success: 0,
@@ -125,7 +116,7 @@ function parseUsersString(raw) {
     for (let line of lines) {
         line = line.trim();
         if (!line || line.startsWith('#') || line.startsWith('//')) continue;
-
+        
         let parts = [];
         if (line.includes('----')) {
             parts = line.split('----');
@@ -165,11 +156,44 @@ function parseExpiryDate(dateStr) {
             }
         }
     }
-
+    
     if (nextD && !isNaN(nextD.getTime())) {
         return Math.ceil((nextD.getTime() - Date.now()) / (1000 * 3600 * 24));
     }
     return null;
+}
+
+// --- 辅助函数：提取服务器页面状态 (到期时间、是否未到期提示、下次开放时间) ---
+async function extractServerStatus(page) {
+    let bodyText = '';
+    try {
+        bodyText = await page.innerText('body');
+    } catch (e) {
+        bodyText = '';
+    }
+
+    let actualExpiry = null;
+    const expiryMatch = bodyText.match(/Expiry\s*[\n\r]*\s*([0-9]{4}-[0-9]{2}-[0-9]{2}|[0-9]{1,2}\s+[a-zA-Z]+(?:\s+[0-9]{4})?)/i);
+    if (expiryMatch) {
+        actualExpiry = expiryMatch[1].trim();
+    }
+
+    let isNotTimeToRenew = false;
+    let nextAvailableNotice = null;
+    if (bodyText.includes("You can't renew your server yet")) {
+        isNotTimeToRenew = true;
+        const nextMatch = bodyText.match(/as of\s+([^\n\r.]+?)(?:\.|\n|$)/i);
+        if (nextMatch) {
+            nextAvailableNotice = nextMatch[1].trim();
+        }
+    }
+
+    return {
+        bodyText,
+        actualExpiry,
+        isNotTimeToRenew,
+        nextAvailableNotice
+    };
 }
 
 // --- 辅助函数：发送 Telegram（图文合并为一条消息） ---
@@ -713,48 +737,35 @@ async function attemptAltchaClick(page, currentStatus = null) {
                 return false;
             }
 
-            // 自适应等待模态框展开动画结束并滚动至视口
+            await page.waitForTimeout(500);
             await altchaWidget.scrollIntoViewIfNeeded().catch(() => {});
 
-            let boxInfo = null;
-            // 最多等待 5 轮 (2.5秒)，确保模态框淡入动画完成并具备有效尺寸
-            for (let round = 0; round < 5; round++) {
-                boxInfo = await page.evaluate(() => {
-                    const widget = document.querySelector('altcha-widget');
-                    if (!widget) return null;
+            let boxInfo = await page.evaluate(() => {
+                const widget = document.querySelector('altcha-widget');
+                if (!widget) return null;
 
-                    const pickClickTarget = (root) => {
-                        if (!root) return null;
-                        return root.querySelector('input[type="checkbox"], [role="checkbox"], label, button');
-                    };
+                const pickClickTarget = (root) => {
+                    if (!root) return null;
+                    return root.querySelector('input[type="checkbox"], [role="checkbox"], label, button');
+                };
 
-                    if (widget.shadowRoot) {
-                        const target = pickClickTarget(widget.shadowRoot);
-                        if (target) {
-                            const rect = target.getBoundingClientRect();
-                            if (rect.width > 0 && rect.height > 0) {
-                                return { x: rect.left, y: rect.top, width: rect.width, height: rect.height, isExact: true, tagName: target.tagName };
-                            }
-                        }
+                if (widget.shadowRoot) {
+                    const target = pickClickTarget(widget.shadowRoot);
+                    if (target) {
+                        const rect = target.getBoundingClientRect();
+                        return { x: rect.left, y: rect.top, width: rect.width, height: rect.height, isExact: true, tagName: target.tagName };
                     }
-
-                    const lightDomTarget = pickClickTarget(widget);
-                    if (lightDomTarget) {
-                        const rect = lightDomTarget.getBoundingClientRect();
-                        if (rect.width > 0 && rect.height > 0) {
-                            return { x: rect.left, y: rect.top, width: rect.width, height: rect.height, isExact: true, tagName: lightDomTarget.tagName };
-                        }
-                    }
-
-                    const rect = widget.getBoundingClientRect();
-                    return { x: rect.left, y: rect.top, width: rect.width, height: rect.height, isExact: false, tagName: widget.tagName };
-                });
-
-                if (boxInfo && boxInfo.width > 0 && boxInfo.height > 0) {
-                    break;
                 }
-                await page.waitForTimeout(500);
-            }
+
+                const lightDomTarget = pickClickTarget(widget);
+                if (lightDomTarget) {
+                    const rect = lightDomTarget.getBoundingClientRect();
+                    return { x: rect.left, y: rect.top, width: rect.width, height: rect.height, isExact: true, tagName: lightDomTarget.tagName };
+                }
+
+                const rect = widget.getBoundingClientRect();
+                return { x: rect.left, y: rect.top, width: rect.width, height: rect.height, isExact: false, tagName: widget.tagName };
+            });
 
             if (boxInfo && boxInfo.width > 0 && boxInfo.height > 0) {
                 let clickX, clickY;
@@ -770,11 +781,10 @@ async function attemptAltchaClick(page, currentStatus = null) {
 
                 await dispatchCdpClick(page, clickX, clickY);
 
-                // 辅助触发 Shadow Root 内部 checkbox
                 await page.evaluate(() => {
                     const widget = document.querySelector('altcha-widget');
                     if (widget && widget.shadowRoot) {
-                        const cb = widget.shadowRoot.querySelector('input[type="checkbox"], [role="checkbox"]');
+                        const cb = widget.shadowRoot.querySelector('input[type="checkbox"]');
                         if (cb && !cb.checked) {
                             cb.click();
                         }
@@ -783,30 +793,7 @@ async function attemptAltchaClick(page, currentStatus = null) {
 
                 return true;
             } else {
-                console.log('>> ⚠️ 无法获取有效物理边界，启动 DOM 级强制注入点击兜底...');
-                const forced = await page.evaluate(() => {
-                    const widget = document.querySelector('altcha-widget');
-                    if (!widget) return false;
-                    let clicked = false;
-                    if (widget.shadowRoot) {
-                        const cb = widget.shadowRoot.querySelector('input[type="checkbox"], [role="checkbox"], label, button');
-                        if (cb) {
-                            cb.focus();
-                            cb.click();
-                            cb.dispatchEvent(new Event('change', { bubbles: true }));
-                            clicked = true;
-                        }
-                    }
-                    const light = widget.querySelector('input[type="checkbox"], [role="checkbox"], label, button');
-                    if (light) {
-                        light.click();
-                        clicked = true;
-                    }
-                    widget.click();
-                    widget.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, view: window }));
-                    return true;
-                });
-                return forced;
+                console.log('>> 找到了 ALTCHA 元素，但获取不到有效大小，跳过点击。');
             }
         }
     } catch (e) {
@@ -1276,11 +1263,11 @@ async function getMihomoProxies() {
             const res = await axios.get('http://127.0.0.1:9090/proxies/MyGroup');
             const all = res.data.all || [];
             const filtered = all.filter(name => name !== 'DIRECT' && name !== 'REJECT' && name !== 'MyGroup');
-
+            
             if (filtered.length > 0) {
                 return filtered;
             }
-
+            
             console.log(`[代理池] 尝试 ${attempt}: 节点数为0，等待 3 秒后重试...`);
             await new Promise(r => setTimeout(r, 3000));
         } catch (e) {
@@ -1288,7 +1275,7 @@ async function getMihomoProxies() {
             await new Promise(r => setTimeout(r, 3000));
         }
     }
-
+    
     console.error('[代理池] 警告：多次尝试后提取到的节点数依然为0！');
     if (fs.existsSync(path.join(process.cwd(), 'sub1.yaml'))) {
         try {
@@ -1296,12 +1283,12 @@ async function getMihomoProxies() {
             console.error('[代理池] sub1.yaml 下载内容前 500 字符:\n', subContent.substring(0, 500));
         } catch(e) {}
     }
-
+    
     try {
         const logContent = fs.readFileSync(path.join(process.cwd(), 'mihomo.log'), 'utf8');
         console.error('[代理池] Mihomo 运行日志:\n', logContent);
     } catch (err) {}
-
+    
     return [];
 }
 
@@ -1450,34 +1437,18 @@ async function switchMihomoProxy(name) {
     for (let i = 0; i < users.length; i++) {
         const user = users[i];
         console.log(`\n=== 正在处理用户 ${i + 1}/${users.length} ===`);
-
+        
         const dedupeKey = user.username.toLowerCase();
-        let nextDateStr = renewDates[dedupeKey];
-        if (nextDateStr) {
-            let nextDate = new Date(nextDateStr);
-            if (!isNaN(nextDate.getTime())) {
-                if (Date.now() < nextDate.getTime()) {
-                    let daysLeft = Math.ceil((nextDate.getTime() - Date.now()) / (1000 * 3600 * 24));
-                    console.log(`[跳过] 账号 ${user.username} 还没到可续期时间，下次可续期: ${nextDateStr} (还剩 ${daysLeft} 天)`);
-                    stats.skipped++;
-                    accountDatesInfo[user.username] = {
-                        status: "⏳ 暂未到期",
-                        nextDate: nextDateStr,
-                        daysLeft: daysLeft,
-                        node: "本地缓存"
-                    };
-                    await sendTelegramMessage(`⏳ *[@s5gydl] ${escapeMarkdown(user.username)}*\n暂未到可续期时间 (已跳过)\n📅 到期/下次可续期: \`${nextDateStr}\` (还剩 ${daysLeft} 天)`);
-                    continue;
-                }
-            }
-        }
+        // 【改造】移除最外层本地缓存盲跳逻辑：
+        // 必须每个账号都真实登录并进入服务器详情页，亲眼读取页面上真实的 Expiry 日期！
+        // 并在页面上对比校准本地记录，杜绝因本地假数据导致漏签漏查。
 
         let accountSuccess = false;
         let accountFailureReason = "未知错误";
         const maxAttempts = (proxyPool.length > 1) ? 5 : 3;
         let page = null;
         let usedNode = 'DIRECT';
-
+        
         for (let accountAttempt = 1; accountAttempt <= maxAttempts; accountAttempt++) {
             if (proxyPool.length > 0) {
                 const nodeName = proxyPool[proxyIndex % proxyPool.length];
@@ -1496,7 +1467,6 @@ async function switchMihomoProxy(name) {
                 if (page && !page.isClosed()) {
                     await page.close().catch(()=>{});
                 }
-
                 await context.clearCookies();
                 page = await context.newPage();
                 page.setDefaultTimeout(60000);
@@ -1506,7 +1476,7 @@ async function switchMihomoProxy(name) {
                 console.log('正在访问登录页...');
                 await page.goto('https://dashboard.katabump.com/auth/login');
                 await page.waitForTimeout(2000);
-
+                
                 const loginTurnstileOk = await solveTurnstileIfPresent(page, "登录阶段", 10, 5000);
                 if (!loginTurnstileOk) {
                     console.log('   >> 登录阶段 Turnstile 验证失败，切换节点重试');
@@ -1518,10 +1488,10 @@ async function switchMihomoProxy(name) {
                 const emailInput = page.getByRole('textbox', { name: 'Email' });
                 await emailInput.waitFor({ state: 'visible', timeout: 5000 });
                 await emailInput.fill(user.username);
-
+                
                 const pwdInput = page.getByRole('textbox', { name: 'Password' });
                 await pwdInput.fill(user.password);
-
+                
                 await page.waitForTimeout(500);
                 await page.getByRole('button', { name: 'Login', exact: true }).click();
 
@@ -1558,6 +1528,7 @@ async function switchMihomoProxy(name) {
                         await page.getByRole('link', { name: 'See' }).first().waitFor({ timeout: 15000 });
                         await page.waitForTimeout(1000);
                         await page.getByRole('link', { name: 'See' }).first().click();
+                        await page.waitForTimeout(3000);
                     } catch (e) {
                         console.log('未找到 "See" 按钮 (可能登录未成功或网络断开)。');
                         accountFailureReason = "找不到 See 按钮，可能节点被阻断";
@@ -1565,7 +1536,56 @@ async function switchMihomoProxy(name) {
                     }
                 }
 
+                const photoDir = path.join(process.cwd(), 'screenshots');
+                if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
+                const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
+
+                // --- 1. 读取页面当前实际状态 (到期时间与未到期提示) ---
+                console.log('正在读取服务器页面到期时间与状态...');
+                let serverStatus = await extractServerStatus(page);
+                let pageActualExpiry = serverStatus.actualExpiry;
+
+                if (pageActualExpiry) {
+                    console.log(`[日期检查] 页面当前实际到期时间: ${pageActualExpiry}`);
+                    // 如果本地记录与页面不一致，重新写入本地文件
+                    if (renewDates[dedupeKey] !== pageActualExpiry) {
+                        console.log(`[日期矫正] 账号 ${user.username}: 本地记录 (${renewDates[dedupeKey] || '空'}) 与页面实际 (${pageActualExpiry}) 不一致，重新写入本地文件！`);
+                        renewDates[dedupeKey] = pageActualExpiry;
+                        saveRenewDates(renewDates);
+                    } else {
+                        saveRenewDates(renewDates);
+                    }
+                }
+
                 let renewPhaseSuccess = false;
+
+                // --- 2. 检查页面是否已直接提示未到期 (You can't renew your server yet) ---
+                if (serverStatus.isNotTimeToRenew) {
+                    let daysLeft = parseExpiryDate(pageActualExpiry) || '未知';
+                    console.log(`[未到期提示] 页面已明确提示未到续期时间。下次可续期: ${serverStatus.nextAvailableNotice || '未知'}`);
+                    
+                    const statusScreenshot = path.join(photoDir, `${safeUsername}_status.png`);
+                    try { await saveViewportScreenshot(page, statusScreenshot); } catch (e) {}
+
+                    let nextNoticeText = serverStatus.nextAvailableNotice ? `\n⏳ 下次可续期: \`${serverStatus.nextAvailableNotice}\`` : '';
+                    await sendTelegramMessage(
+                        `🔄 *[@s5gydl] ${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${pageActualExpiry || '已校正'}\` (还剩 ${daysLeft} 天)${nextNoticeText}`,
+                        statusScreenshot
+                    );
+
+                    stats.skipped++;
+                    accountDatesInfo[user.username] = {
+                        status: "🔄 校正成功(未到期)",
+                        nextDate: pageActualExpiry || '已校正',
+                        daysLeft: daysLeft,
+                        node: usedNode
+                    };
+                    renewPhaseSuccess = true;
+                    accountSuccess = true;
+                    break;
+                }
+
+                // --- 3. 页面未显示不可续期警告，进入 Renew 按钮与弹窗处理 ---
                 for (let attempt = 1; attempt <= RENEW_MAX_ATTEMPTS; attempt++) {
                     if (page.url().includes('login')) {
                         console.log('页面被重定向到登录页，退出 Renew 循环。');
@@ -1574,247 +1594,191 @@ async function switchMihomoProxy(name) {
 
                     console.log(`\n[尝试 ${attempt}/${RENEW_MAX_ATTEMPTS}] 正在寻找 Renew 按钮...`);
                     const renewBtn = page.getByRole('button', { name: 'Renew', exact: true }).first();
-
+                    
                     try { await renewBtn.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) { }
 
                     if (await renewBtn.isVisible()) {
                         await renewBtn.click();
                         console.log('Renew 按钮已点击。等待模态框...');
 
-                        const modal = page.locator('.modal-content, [role="dialog"]').filter({ hasText: 'Renew' }).first();
-                        try { await modal.waitFor({ state: 'visible', timeout: 5000 }); } catch (e) {
+                        const modal = page.locator('.modal-content, [role="dialog"], div:has-text("This will extend the life of your server.")').filter({ hasText: 'Renew' }).last();
+                        try { await modal.waitFor({ state: 'visible', timeout: 8000 }); } catch (e) {
                             console.log('模态框未出现？重试中...');
-                            if (IS_DEBUG_MODE) {
-                                const photoDir = path.join(process.cwd(), 'screenshots');
-                                if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                                const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
-                                const modalMissShot = path.join(photoDir, `${safeUsername}_modal_missing_${attempt}.png`);
-                                try {
-                                    await saveViewportScreenshot(page, modalMissShot);
-                                    await sendTelegramMessage(`⚠️ *[@s5gydl Debug] 模态框未按预期弹出*\n👤 账号: \`${escapeMarkdown(user.username)}\`\n🔄 尝试: \`${attempt}/${RENEW_MAX_ATTEMPTS}\``, modalMissShot);
-                                } catch (err) {}
-                            }
                             continue;
                         }
 
-                        const photoDir = path.join(process.cwd(), 'screenshots');
-                        if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
-                        const safeUsername = user.username.replace(/[^a-z0-9]/gi, '_');
-                        const captchaScreenshotName = `${safeUsername}_modal_${attempt}.png`;
-                        const captchaScreenshotPath = path.join(photoDir, captchaScreenshotName);
                         try {
-                            await saveViewportScreenshot(page, captchaScreenshotPath);
-                            console.log(`   >> 模态框截图已保存: ${captchaScreenshotName}`);
-                            if (IS_DEBUG_MODE) {
-                                await sendTelegramMessage(
-                                    `🔍 *[@s5gydl Debug] Renew 模态框已弹出*\n` +
-                                    `👤 账号: \`${escapeMarkdown(user.username)}\`\n` +
-                                    `🔄 尝试: \`${attempt}/${RENEW_MAX_ATTEMPTS}\`\n` +
-                                    `🌐 节点: \`${escapeMarkdown(usedNode || '直连')}\``,
-                                    captchaScreenshotPath
-                                );
-                            }
+                            const box = await modal.boundingBox();
+                            if (box) await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2, { steps: 5 });
                         } catch (e) { }
 
-                        // 快速探测是否弹窗中包含可见验证码
-                        const hasVisibleCaptcha = await page.locator('altcha-widget').isVisible({ timeout: 1500 }).catch(() => false);
-                        if (hasVisibleCaptcha) {
-                            console.log('   >> 探测到模态框内含有验证码，尝试算力验证...');
-                            const altchaOk = await solveAltchaIfPresent(page, "Renew弹窗", 10, 5000);
-                            if (!altchaOk) {
-                                console.log('   >> 验证码未通过，刷新重试...');
-                                await page.reload();
-                                await page.waitForTimeout(3000);
-                                if (page.url().includes('login')) break;
-                                continue;
-                            }
-                        } else {
-                            console.log('   >> 模态框无验证码，直接准备确认续期！');
+                        let confirmBtn = modal.getByRole('button', { name: 'Renew', exact: true });
+                        if (!(await confirmBtn.isVisible().catch(() => false))) {
+                            confirmBtn = modal.locator('button:has-text("Renew")').last();
                         }
-
-                        /* =========================================================================
-                         * [备用历史逻辑保留]：若未来 KataBump 服务器重新在弹窗中引入 ALTCHA 验证码，可解开以下代码：
-                         * =========================================================================
-                         * // 1. 显式等待模态框内 altcha-widget 渲染展开
-                         * try {
-                         *     const altchaWidgetLoc = modal.locator('altcha-widget').first();
-                         *     await altchaWidgetLoc.waitFor({ state: 'visible', timeout: 10000 });
-                         *     console.log('   >> 模态框内 ALTCHA 组件已展开呈现。');
-                         * } catch (e) {
-                         *     console.log('   >> 模态框内未检测到显式可见的 altcha-widget，继续尝试解算...');
-                         * }
-                         *
-                         * // 2. 深度算力求解与验证
-                         * const altchaOk = await solveAltchaIfPresent(page, "Renew弹窗", 15, 8000);
-                         * if (!altchaOk) {
-                         *     console.log('   >> ALTCHA 未通过，跳过确认按钮并刷新重试...');
-                         *     if (IS_DEBUG_MODE) {
-                         *         const altchaFailShot = path.join(photoDir, `${safeUsername}_ALTCHA_fail_${attempt}.png`);
-                         *         try {
-                         *             await saveViewportScreenshot(page, altchaFailShot);
-                         *             await sendTelegramMessage(`⚠️ *[@s5gydl Debug] ALTCHA 验证未通过现场*\n👤 账号: \`${escapeMarkdown(user.username)}\``, altchaFailShot);
-                         *         } catch (err) {}
-                         *     }
-                         *     await page.reload();
-                         *     await page.waitForTimeout(3000);
-                         *     if (page.url().includes('login')) break;
-                         *     continue;
-                         * }
-                         * ========================================================================= */
-
-                        console.log('   >> 点击模态框中的紫色 Renew 确认按钮...');
-                        let confirmClicked = false;
-
-                        // 1. Playwright 优先尝试点击模态框内文本严格匹配为 Renew 的按钮
-                        try {
-                            const modalRenewBtn = modal.locator('button').filter({ hasText: /^Renew$/i }).first();
-                            await modalRenewBtn.click({ force: true, timeout: 3000 });
-                            confirmClicked = true;
-                            console.log('   >> ✅ 模态框 Renew 按钮已点击 (Playwright)');
-                        } catch (e) {
-                            console.log('   >> ⚠️ Playwright 快速点击未命中，切换 DOM 精确触发...');
-                        }
-
-                        // 2. DOM 级精确寻找并触发弹窗内的 Renew 按钮
-                        if (!confirmClicked) {
-                            confirmClicked = await page.evaluate(() => {
-                                const modalEl = document.querySelector('.modal-content, [role="dialog"], .modal');
-                                if (modalEl) {
-                                    const btns = Array.from(modalEl.querySelectorAll('button'));
-                                    // 优先找文本为 Renew 的按钮，避免点到 Close
-                                    const renewBtnEl = btns.find(b => b.textContent && b.textContent.trim().toLowerCase() === 'renew');
-                                    if (renewBtnEl) {
-                                        renewBtnEl.disabled = false;
-                                        renewBtnEl.focus();
-                                        renewBtnEl.click();
-                                        return true;
-                                    }
-                                    // 兜底找除 close 之外的最后一个按钮
-                                    const actionBtn = btns.filter(b => !b.textContent.toLowerCase().includes('close')).pop();
-                                    if (actionBtn) {
-                                        actionBtn.click();
-                                        return true;
-                                    }
-                                }
-                                return false;
-                            });
-                            if (confirmClicked) {
-                                console.log('   >> ✅ 已通过 DOM 注入精准触发模态框 Renew 按钮！');
-                            }
-                        }
-
-                            let hasCaptchaError = false;
+                        if (await confirmBtn.isVisible()) {
+                            
+                            const captchaScreenshotName = `${safeUsername}_modal_${attempt}.png`;
                             try {
-                                const startVerifyTime = Date.now();
-                                while (Date.now() - startVerifyTime < 3000) {
-                                    if (await page.getByText('Please complete the captcha to continue').isVisible()) {
-                                        console.log('   >> ⚠️ 错误: "Please complete the captcha".');
-                                        hasCaptchaError = true;
-                                        break;
-                                    }
-                                    const notTimeLoc = page.getByText("You can't renew your server yet");
-                                    if (await notTimeLoc.isVisible()) {
-                                        const text = await notTimeLoc.innerText().catch(() => '');
-                                        const match = text.match(/as of\s+(.*?)\s+\(/);
-                                        let dateStr = match ? match[1] : 'Unknown Date';
-                                        console.log(`   >> ⏳ 暂无法续期 (还没到时间)。下次可续期: ${dateStr}`);
-                                        renewPhaseSuccess = true;
-                                        stats.skipped++;
-
-                                        let daysLeft = '未知';
-                                        if (dateStr !== 'Unknown Date') {
-                                            renewDates[dedupeKey] = dateStr;
-                                            saveRenewDates(renewDates);
-                                            let parsedDays = parseExpiryDate(dateStr);
-                                            if (parsedDays !== null) {
-                                                daysLeft = parsedDays;
-                                            }
-                                        }
-                                        accountDatesInfo[user.username] = {
-                                            status: "⏳ 时间未到",
-                                            nextDate: dateStr,
-                                            daysLeft: daysLeft,
-                                            node: usedNode
-                                        };
-
-                                        const skipScreenshot = path.join(photoDir, `${safeUsername}_skip.png`);
-                                        try { await saveViewportScreenshot(page, skipScreenshot); } catch (e) {}
-                                        await sendTelegramMessage(`⏳ *[@s5gydl] ${escapeMarkdown(user.username)}*\n暂无法续期 (时间未到)\n📅 到期/下次可续期: \`${dateStr}\` (还剩 ${daysLeft} 天)`, skipScreenshot);
-                                        break;
-                                    }
-                                    await page.waitForTimeout(200);
-                                }
+                                await saveViewportScreenshot(page, path.join(photoDir, captchaScreenshotName));
+                                console.log(`   >> 弹窗截图已保存: ${captchaScreenshotName}`);
                             } catch (e) { }
 
-                            if (renewPhaseSuccess) break;
+                            console.log('   >> 点击弹窗中的 Renew 确认按钮...');
+                            await confirmBtn.click({ force: true }).catch(() => confirmBtn.click());
 
-                            if (hasCaptchaError) {
-                                console.log('   >> 验证码未通过，刷新页面重试...');
+                            // 等待服务端处理及页面响应
+                            console.log('   >> 等待页面反馈...');
+                            await page.waitForTimeout(2500);
+
+                            // 点击后立即检查页面状态 (包括主页面及弹窗中的提示)
+                            let afterClickStatus = await extractServerStatus(page);
+
+                            // A. 检查是否提示未到期 (例如后端抛出红色警告条)
+                            if (afterClickStatus.isNotTimeToRenew || (await page.getByText("You can't renew your server yet").isVisible().catch(() => false))) {
+                                let curExpiry = afterClickStatus.actualExpiry || pageActualExpiry;
+                                let daysLeft = parseExpiryDate(curExpiry) || '未知';
+                                console.log(`   >> ⏳ 暂无法续期 (时间未到)。下次可续期: ${afterClickStatus.nextAvailableNotice || '未知'}`);
+                                
+                                if (curExpiry) {
+                                    if (renewDates[dedupeKey] !== curExpiry) {
+                                        console.log(`[日期矫正] 重新写入本地记录: ${curExpiry}`);
+                                        renewDates[dedupeKey] = curExpiry;
+                                    }
+                                    saveRenewDates(renewDates);
+                                }
+
+                                const statusScreenshot = path.join(photoDir, `${safeUsername}_status.png`);
+                                try { await saveViewportScreenshot(page, statusScreenshot); } catch (e) {}
+
+                                let nextNoticeText = afterClickStatus.nextAvailableNotice ? `\n⏳ 下次可续期: \`${afterClickStatus.nextAvailableNotice}\`` : '';
+                                await sendTelegramMessage(
+                                    `🔄 *[@s5gydl] ${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${curExpiry || '已校正'}\` (还剩 ${daysLeft} 天)${nextNoticeText}`,
+                                    statusScreenshot
+                                );
+
+                                stats.skipped++;
+                                accountDatesInfo[user.username] = {
+                                    status: "🔄 校正成功(未到期)",
+                                    nextDate: curExpiry || '已校正',
+                                    daysLeft: daysLeft,
+                                    node: usedNode
+                                };
+                                renewPhaseSuccess = true;
+                                break;
+                            }
+
+                            // B. 检查是否有验证码报错
+                            if (await page.getByText('Please complete the captcha to continue').isVisible().catch(() => false)) {
+                                console.log('   >> ⚠️ 提示需要验证码，刷新页面重试...');
                                 await page.reload();
                                 await page.waitForTimeout(3000);
                                 if (page.url().includes('login')) break;
                                 continue;
                             }
 
-                            await page.waitForTimeout(2000);
+                            // C. 弹窗关闭后的最终验证 (刷新页面比对日期与横幅)
                             if (!await modal.isVisible()) {
-                                console.log('   >> ✅ Renew successful!');
-
-                                console.log('   >> 尝试获取续期后的精确日期...');
-                                await page.reload();
-                                await page.waitForTimeout(3000);
-
-                                let accurateDate = "已续期(待下次更新)";
-                                let accurateDays = "约30";
+                                console.log('   >> 弹窗已关闭，正在刷新页面获取最新状态...');
+                                await page.waitForTimeout(2000);
                                 try {
-                                    const bodyText = await page.innerText('body').catch(() => '');
-                                    const expiryMatch = bodyText.match(/Expiry\s*[\n\r]*\s*(\d{4}-\d{2}-\d{2}|\d{1,2}\s+[a-zA-Z]+(?:\s+\d{4})?)/i);
-
-                                    if (expiryMatch) {
-                                        accurateDate = expiryMatch[1];
-                                        let parsedDays = parseExpiryDate(accurateDate);
-                                        if (parsedDays !== null) {
-                                            accurateDays = parsedDays;
-                                        }
-                                        renewDates[dedupeKey] = accurateDate;
-                                    } else {
-                                        const renewBtnCheck = page.getByRole('button', { name: 'Renew', exact: true }).first();
-                                        if (await renewBtnCheck.isVisible()) {
-                                            await renewBtnCheck.click();
-                                            await page.waitForTimeout(2000);
-                                            const notTimeLocCheck = page.getByText("You can't renew your server yet");
-                                            if (await notTimeLocCheck.isVisible({ timeout: 3000 })) {
-                                                const text = await notTimeLocCheck.innerText().catch(() => '');
-                                                const match = text.match(/as of\s+(.*?)\s+\(/);
-                                                if (match) {
-                                                    accurateDate = match[1];
-                                                    let parsedDays = parseExpiryDate(accurateDate);
-                                                    if (parsedDays !== null) {
-                                                        accurateDays = parsedDays;
-                                                    }
-                                                    renewDates[dedupeKey] = accurateDate;
-                                                }
-                                            }
-                                        }
+                                    await page.reload({ timeout: 10000 });
+                                    await page.waitForTimeout(2000);
+                                } catch (reloadErr) {
+                                    if (user.serverId) {
+                                        await page.goto(`https://dashboard.katabump.com/servers/edit?id=${user.serverId}`, { timeout: 15000 }).catch(() => {});
+                                        await page.waitForTimeout(2000);
                                     }
-                                } catch(e) {
-                                    console.log("   >> 获取精确日期失败: " + e.message);
                                 }
 
-                                const successScreenshot = path.join(photoDir, `${safeUsername}_success.png`);
-                                try { await saveViewportScreenshot(page, successScreenshot); } catch (e) {}
-                                await sendTelegramMessage(`✅ *[@s5gydl] ${escapeMarkdown(user.username)}*\n续期成功！\n📅 有效期更新至: \`${accurateDate}\` (还剩 ${accurateDays} 天)`, successScreenshot);
-                                renewPhaseSuccess = true;
-                                stats.success++;
+                                const refreshedStatus = await extractServerStatus(page);
 
-                                saveRenewDates(renewDates);
-                                accountDatesInfo[user.username] = {
-                                    status: "✅ 续期成功",
-                                    nextDate: accurateDate,
-                                    daysLeft: accurateDays,
-                                    node: usedNode
-                                };
-                                break;
+                                // 再次确认刷新后是否有未到期红条
+                                if (refreshedStatus.isNotTimeToRenew) {
+                                    let curExpiry = refreshedStatus.actualExpiry || pageActualExpiry;
+                                    let daysLeft = parseExpiryDate(curExpiry) || '未知';
+                                    console.log(`   >> ⏳ 刷新后发现未到续期时间。下次可续期: ${refreshedStatus.nextAvailableNotice || '未知'}`);
+                                    
+                                    if (curExpiry) {
+                                        renewDates[dedupeKey] = curExpiry;
+                                        saveRenewDates(renewDates);
+                                    }
+
+                                    const statusScreenshot = path.join(photoDir, `${safeUsername}_status.png`);
+                                    try { await saveViewportScreenshot(page, statusScreenshot); } catch (e) {}
+
+                                    let nextNoticeText = refreshedStatus.nextAvailableNotice ? `\n⏳ 下次可续期: \`${refreshedStatus.nextAvailableNotice}\`` : '';
+                                    await sendTelegramMessage(
+                                        `🔄 *[@s5gydl] ${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${curExpiry || '已校正'}\` (还剩 ${daysLeft} 天)${nextNoticeText}`,
+                                        statusScreenshot
+                                    );
+
+                                    stats.skipped++;
+                                    accountDatesInfo[user.username] = {
+                                        status: "🔄 校正成功(未到期)",
+                                        nextDate: curExpiry || '已校正',
+                                        daysLeft: daysLeft,
+                                        node: usedNode
+                                    };
+                                    renewPhaseSuccess = true;
+                                    break;
+                                }
+
+                                // 检查日期是否真正发生了更新 (延期)
+                                const newExpiry = refreshedStatus.actualExpiry;
+                                const isDateExtended = newExpiry && pageActualExpiry && (newExpiry !== pageActualExpiry);
+
+                                if (isDateExtended) {
+                                    console.log(`   >> ✅ 续期成功！有效期从 ${pageActualExpiry} 更新至 ${newExpiry}`);
+                                    let accurateDays = parseExpiryDate(newExpiry) || '约30';
+                                    
+                                    renewDates[dedupeKey] = newExpiry;
+                                    saveRenewDates(renewDates);
+
+                                    const successScreenshot = path.join(photoDir, `${safeUsername}_success.png`);
+                                    try { await saveViewportScreenshot(page, successScreenshot); } catch (e) {}
+                                    await sendTelegramMessage(
+                                        `✅ *[@s5gydl] ${escapeMarkdown(user.username)}*\n续期成功！\n📅 有效期更新至: \`${newExpiry}\` (还剩 ${accurateDays} 天)`,
+                                        successScreenshot
+                                    );
+
+                                    stats.success++;
+                                    accountDatesInfo[user.username] = {
+                                        status: "✅ 续期成功",
+                                        nextDate: newExpiry,
+                                        daysLeft: accurateDays,
+                                        node: usedNode
+                                    };
+                                    renewPhaseSuccess = true;
+                                    break;
+                                } else {
+                                    // 日期未变且无红条：判定为当前正常、校正日期
+                                    let curExpiry = newExpiry || pageActualExpiry || '已校正';
+                                    let daysLeft = parseExpiryDate(curExpiry) || '未知';
+                                    console.log(`   >> 🔄 日期无需更新或未发生变动 (${curExpiry})，完成校对并同步本地文件`);
+                                    
+                                    if (newExpiry) {
+                                        renewDates[dedupeKey] = newExpiry;
+                                        saveRenewDates(renewDates);
+                                    }
+
+                                    const statusScreenshot = path.join(photoDir, `${safeUsername}_status.png`);
+                                    try { await saveViewportScreenshot(page, statusScreenshot); } catch (e) {}
+                                    await sendTelegramMessage(
+                                        `🔄 *[@s5gydl] ${escapeMarkdown(user.username)}*\n校正日期成功 (未到续期时间)\n📅 实际有效期: \`${curExpiry}\` (还剩 ${daysLeft} 天)`,
+                                        statusScreenshot
+                                    );
+
+                                    stats.skipped++;
+                                    accountDatesInfo[user.username] = {
+                                        status: "🔄 校正成功",
+                                        nextDate: curExpiry,
+                                        daysLeft: daysLeft,
+                                        node: usedNode
+                                    };
+                                    renewPhaseSuccess = true;
+                                    break;
+                                }
                             } else {
                                 console.log('   >> 模态框未关闭，刷新重试...');
                                 await page.reload();
@@ -1822,8 +1786,34 @@ async function switchMihomoProxy(name) {
                                 if (page.url().includes('login')) break;
                                 continue;
                             }
+                        } else {
+                            await page.reload();
+                            await page.waitForTimeout(3000);
+                            if (page.url().includes('login')) break;
+                            continue;
+                        }
                     } else {
-                        console.log('未找到 Renew 按钮 (可能已结束)。');
+                        console.log('未找到 Renew 按钮 (可能已结束或暂不可续期)。校对日期并保存。');
+                        let curExpiry = pageActualExpiry || '已校正';
+                        let daysLeft = parseExpiryDate(curExpiry) || '未知';
+                        if (pageActualExpiry) {
+                            renewDates[dedupeKey] = pageActualExpiry;
+                            saveRenewDates(renewDates);
+                        }
+                        const statusScreenshot = path.join(photoDir, `${safeUsername}_status.png`);
+                        try { await saveViewportScreenshot(page, statusScreenshot); } catch (e) {}
+                        await sendTelegramMessage(
+                            `🔄 *[@s5gydl] ${escapeMarkdown(user.username)}*\n校正日期成功\n📅 实际有效期: \`${curExpiry}\` (还剩 ${daysLeft} 天)`,
+                            statusScreenshot
+                        );
+                        stats.skipped++;
+                        accountDatesInfo[user.username] = {
+                            status: "🔄 校正成功",
+                            nextDate: curExpiry,
+                            daysLeft: daysLeft,
+                            node: usedNode
+                        };
+                        renewPhaseSuccess = true;
                         break;
                     }
                 } 
@@ -1861,7 +1851,7 @@ async function switchMihomoProxy(name) {
                 node: usedNode
             };
         }
-
+        
         if (page && !page.isClosed()) {
             const photoDir = path.join(process.cwd(), 'screenshots');
             if (!fs.existsSync(photoDir)) fs.mkdirSync(photoDir, { recursive: true });
@@ -1874,7 +1864,7 @@ async function switchMihomoProxy(name) {
     // --- 发送最终汇总报告 ---
     let summaryMessage = `📊 *续期任务汇总报告*\n`;
     summaryMessage += `📢 来源群组: @s5gydl\n\n`;
-
+    
     if (proxyStats.source !== 'NONE') {
         summaryMessage += `🌐 *节点池状态* (${proxyStats.source}):\n`;
         summaryMessage += `- 📥 提取总数: ${proxyStats.total}\n`;
@@ -1892,9 +1882,9 @@ async function switchMihomoProxy(name) {
 
     summaryMessage += `🔹 总计账号: ${stats.total}\n`;
     summaryMessage += `✅ 成功续期: ${stats.success}\n`;
-    summaryMessage += `⏳ 暂未到期: ${stats.skipped}\n`;
+    summaryMessage += `🔄 矫正/未到期: ${stats.skipped}\n`;
     summaryMessage += `❌ 失败数量: ${stats.failed}\n\n`;
-
+    
     summaryMessage += `📅 *账号详细信息*:\n`;
     users.forEach(user => {
         let info = accountDatesInfo[user.username];
@@ -1910,7 +1900,7 @@ async function switchMihomoProxy(name) {
                  }
              }
         }
-
+        
         summaryMessage += `\n👤 \`${escapeMarkdown(user.username)}\`\n`;
         summaryMessage += ` ├ 状态: ${info.status}\n`;
         summaryMessage += ` ├ 节点: \`${escapeMarkdown(info.node)}\`\n`;
@@ -1923,7 +1913,7 @@ async function switchMihomoProxy(name) {
             summaryMessage += `- \`${escapeMarkdown(acc)}\`\n`;
         });
     }
-
+    
     await sendTelegramMessage(summaryMessage);
 
     console.log('完成。');
